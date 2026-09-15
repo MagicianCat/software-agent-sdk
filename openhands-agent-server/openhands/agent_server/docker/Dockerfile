@@ -190,8 +190,14 @@ RUN set -eux; \
     # is short-lived enough on non-Debian images that PID 1 zombie reaping
     # has not been observed to matter — revisit if it does).
     if command -v apt-get >/dev/null 2>&1; then \
-        apt-get -o Acquire::Retries=5 update; \
-        apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i \
+                -e 's|http://deb.debian.org|https://deb.debian.org|g' \
+                -e 's|http://security.debian.org|https://security.debian.org|g' \
+                {} +; \
+        apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=30 update; \
+        apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends \
             bash ca-certificates curl wget sudo apt-utils git jq tmux tar \
             build-essential coreutils util-linux procps findutils grep sed \
             tini apt-transport-https gnupg lsb-release xz-utils; \
