@@ -1279,6 +1279,25 @@ class TestPluginMcpSecretsExpansion:
             f"Expected 'Bearer my-actual-secret', got '{auth_header}'"
         )
 
+        # A resumed long-lived conversation receives a fresh per-job token.
+        # The already-expanded MCP config must rotate with the registry value.
+        conversation.update_secrets({"SECRET_TOKEN": "rotated-secret"})
+        rotated_headers = dump_mcp_config(conversation.agent.mcp_config)["test-server"][
+            "headers"
+        ]
+        assert rotated_headers["Authorization"] == "Bearer rotated-secret"
+
+        # Reconcile a legacy persisted state where the registry was updated
+        # but the expanded MCP header was not.
+        conversation._state.secret_registry.update_secrets(
+            {"SECRET_TOKEN": "registry-only-secret"}
+        )
+        conversation.update_secrets({"SECRET_TOKEN": "registry-only-secret"})
+        reconciled_headers = dump_mcp_config(conversation.agent.mcp_config)[
+            "test-server"
+        ]["headers"]
+        assert reconciled_headers["Authorization"] == "Bearer registry-only-secret"
+
         conversation.close()
 
     def test_plugin_mcp_secrets_with_defaults(self, tmp_path: Path, basic_agent):

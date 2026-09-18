@@ -2770,7 +2770,67 @@ class LocalConversation(BaseConversation):
                      when a command references the secret key.
         """
         secret_registry = self._state.secret_registry
+        previous_values = {
+            name: secret_registry.get_secret_value(name) for name in secrets
+        }
         secret_registry.update_secrets(secrets)
+
+        # MCP variables are expanded when the agent is initialized and the
+        # expanded config is persisted.  Rotating a conversation secret later
+        # must therefore also replace the old expanded value in the live MCP
+        # config; updating SecretRegistry alone leaves resumed conversations
+        # authenticating with an expired bearer token.
+        replacements: dict[str, str] = {}
+        for name, old in previous_values.items():
+            new = secret_registry.get_secret_value(name)
+            if old and new and new != old:
+                replacements[old] = new
+        if self.agent.mcp_config:
+
+            def replace_values(value: Any) -> Any:
+                if isinstance(value, str):
+                    for old, new in replacements.items():
+                        value = value.replace(old, new)
+                    return value
+                if isinstance(value, dict):
+                    return {key: replace_values(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [replace_values(item) for item in value]
+                return value
+
+            updated_mcp: dict[str, Any] = replace_values(
+                dump_mcp_config(self.agent.mcp_config)
+            )
+
+            # Older persisted conversations may already have diverged: the
+            # registry contains the current token while the single MCP server
+            # still contains an earlier expanded bearer value. In that
+            # unambiguous case, reconcile the bearer directly.
+            token_values = [
+                secret_registry.get_secret_value(name)
+                for name in secrets
+                if name.endswith("TOKEN")
+            ]
+            token_values = [value for value in token_values if value]
+            if len(updated_mcp) == 1 and len(token_values) == 1:
+                server = next(iter(updated_mcp.values()))
+                auth = server.get("auth")
+                if isinstance(auth, dict) and auth.get("strategy") == "bearer":
+                    auth["value"] = token_values[0]
+                headers = server.get("headers")
+                if isinstance(headers, dict):
+                    authorization = headers.get("Authorization")
+                    if isinstance(authorization, str) and authorization.startswith(
+                        "Bearer "
+                    ):
+                        headers["Authorization"] = f"Bearer {token_values[0]}"
+
+            if updated_mcp != dump_mcp_config(self.agent.mcp_config):
+                with self._state:
+                    self.agent = self.agent.model_copy(
+                        update={"mcp_config": coerce_mcp_config(updated_mcp)}
+                    )
+                    self._state.agent = self.agent
         logger.info(f"Added {len(secrets)} secrets to conversation")
 
     def set_security_analyzer(self, analyzer: SecurityAnalyzerBase | None) -> None:
